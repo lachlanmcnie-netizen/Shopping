@@ -1,0 +1,240 @@
+﻿<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#1f6f5f">
+  <link rel="manifest" href="shopping-manifest.webmanifest">
+  <link rel="icon" href="shopping-icon.svg" type="image/svg+xml">
+  <title>Shared Shopping List</title>
+  <link rel="stylesheet" href="shopping-app.css">
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="shopping-cloud-config.js"></script>
+  <script src="shopping-auth.js"></script>
+  <script src="shopping-categories.js"></script>
+</head>
+<body>
+  <div class="shell">
+    <div class="grid" id="appGrid">
+      <section class="panel" id="householdPanel">
+        <div class="panel-header">
+          <p class="eyebrow">Household Setup</p>
+          <h2>Create or join a shared home</h2>
+          <p class="subtle">If you create the household, you are added automatically. Only use the join form if someone else already gave you an invite code.</p>
+        </div>
+
+        <div class="household-grid">
+          <form id="createHouseholdForm" class="field">
+            <label for="householdName">Household name</label>
+            <input id="householdName" type="text" placeholder="Flat on Oak Street" required>
+            <button type="submit">Create household and join</button>
+          </form>
+
+          <form id="joinHouseholdForm" class="field join-box">
+            <label for="inviteCode">Invite code</label>
+            <input id="inviteCode" type="text" placeholder="ABC123" required>
+            <label for="displayName">Your display name</label>
+            <input id="displayName" type="text" placeholder="Jamie" required>
+            <button type="submit">Join household</button>
+          </form>
+        </div>
+
+        <p class="message" id="householdMessage"></p>
+      </section>
+
+      <section class="panel hidden" id="listPanel">
+        <div class="panel-header shopping-header">
+          <p class="eyebrow">Shared Shopping List</p>
+          <h2>Shopping list</h2>
+          <p class="subtle" id="householdSummary">Loading your household...</p>
+          <div class="item-meta">
+            <span class="pill" id="memberPill">0 members</span>
+            <span class="status-pill warning" id="urgentPill">0 urgent</span>
+            <span class="pill" id="estimatePill">Est. NZ$0.00</span>
+          </div>
+        </div>
+
+        <div class="tab-row view-mode-row">
+          <button class="tab active" id="groupViewButton" type="button">View as groups</button>
+          <button class="tab" id="categoryViewButton" type="button">View as categories</button>
+        </div>
+
+        <section class="composer-card" id="composerCard">
+          <div class="panel-header composer-header">
+            <p class="eyebrow">Add To List</p>
+            <h3>Add what you need</h3>
+            <p class="subtle">Start with a quick pick or open the form for a full item, note, or meal bundle.</p>
+          </div>
+          <div class="household-actions composer-actions-row">
+            <button id="toggleAddPanelButton" type="button">Add item</button>
+          </div>
+
+          <form id="addEntryForm" class="field compact-form hidden">
+            <div class="field">
+              <label for="itemName">Item name</label>
+              <input id="itemName" type="text" placeholder="Milk" required>
+            </div>
+
+            <div class="field">
+              <label for="itemNote">Optional note</label>
+              <input id="itemNote" type="text" placeholder="2 litres, blue cap">
+            </div>
+
+            <div class="household-actions composer-options-row">
+              <label class="checkbox-wrap" for="itemUrgent">
+                <input id="itemUrgent" type="checkbox">
+                Mark as urgent
+              </label>
+              <label class="checkbox-wrap" for="isMealGroup">
+                <input id="isMealGroup" type="checkbox">
+                Save as meal bundle
+              </label>
+            </div>
+
+            <div class="meal-fields hidden" id="mealFields">
+              <div class="field">
+                <label for="mealName">Meal bundle name</label>
+                <input id="mealName" type="text" placeholder="Spaghetti bolognese">
+              </div>
+              <div class="field">
+                <label for="mealItems">Items in this meal</label>
+                <textarea id="mealItems" rows="5" placeholder="Pasta&#10;Mince&#10;Tomato sauce&#10;Parmesan"></textarea>
+              </div>
+            </div>
+
+            <div class="household-actions">
+              <button type="submit">Save to list</button>
+            </div>
+
+            <section class="recipe-scan-card">
+              <div class="panel-header recipe-scan-header">
+                <p class="eyebrow">Recipe Scan</p>
+                <h3>Scan a recipe page</h3>
+                <p class="subtle">Choose a recipe photo from your gallery or camera, then keep only the ingredients you actually need.</p>
+              </div>
+
+              <input id="recipeImageInput" type="file" accept="image/*" class="hidden">
+
+              <div class="household-actions recipe-scan-actions">
+                <button class="secondary recipe-scan-action-button" id="takeRecipePhotoButton" type="button">Take photo</button>
+                <button class="secondary" id="chooseRecipeImageButton" type="button">Choose photo</button>
+              </div>
+
+              <p class="helper-text" id="recipeScanStatus">No recipe image selected yet.</p>
+
+              <div class="recipe-scan-results hidden" id="recipeScanResults">
+                <div class="field">
+                  <label for="scannedMealName">Meal name</label>
+                  <input id="scannedMealName" type="text" placeholder="Type the meal name if the scan missed it">
+                </div>
+
+                <div class="field">
+                  <label>Review ingredients</label>
+                  <p class="helper-text">Edit any ingredient names that look off, then untick anything you do not want to add.</p>
+                  <div class="recipe-scan-list" id="recipeScanList"></div>
+                </div>
+
+                <div class="household-actions">
+                  <button id="addScannedRecipeButton" type="button">Add selected ingredients</button>
+                  <button class="secondary" id="clearRecipeScanButton" type="button">Clear scan</button>
+                </div>
+              </div>
+            </section>
+
+            <div class="household-actions">
+              <button class="secondary" id="toggleWoolworthsExportButton" type="button">Show price guide</button>
+            </div>
+          </form>
+
+          <section class="notice hidden" id="woolworthsExportPanel">
+            <div class="panel-header">
+              <p class="eyebrow">Price Guide</p>
+              <h3>Estimated New Zealand prices</h3>
+              <p class="subtle">These are rough NZD estimates for planning only. They use common grocery baselines adjusted by the latest official New Zealand CPI.</p>
+            </div>
+            <p class="helper-text" id="woolworthsPriceStatus">Estimated using Stats NZ all-groups CPI for the December 2025 quarter.</p>
+            <div class="list woolworths-export-list" id="woolworthsExportList"></div>
+          </section>
+        </section>
+
+        <section class="notepad-shell">
+          <div class="notepad-header">
+            <p class="eyebrow">To Buy</p>
+            <p class="subtle" id="notepadHint">Items are grouped by meal when you add them together.</p>
+          </div>
+          <div class="notepad-list" id="shoppingList"></div>
+          <div class="list-empty hidden" id="emptyState">
+            <div class="notice">
+              <p class="message" id="emptyMessage">No items here yet.</p>
+            </div>
+          </div>
+        </section>
+
+        <section class="notice recent-section">
+          <button class="collapse-toggle" id="toggleRecentButton" type="button">Recently purchased</button>
+          <div class="recent-panel hidden" id="recentPanel">
+            <div class="notepad-list recent-list" id="recentShoppingList"></div>
+            <div class="list-empty hidden" id="recentEmptyState">
+              <div class="notice">
+                <p class="message" id="recentEmptyMessage">No purchases in the last 4 days.</p>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <button class="mobile-composer-button" id="mobileComposerButton" type="button">+ Item</button>
+      </section>
+
+      <aside class="panel hidden" id="sidebarPanel">
+        <div class="panel-header">
+          <p class="eyebrow">Household</p>
+          <h3 id="householdNameHeading">Household</h3>
+          <p class="subtle">Invite someone new only when you need the code.</p>
+        </div>
+
+        <div class="notice invite-toggle-card">
+          <div class="household-actions">
+            <button id="toggleInviteButton" type="button">Invite member</button>
+          </div>
+          <div class="invite-panel hidden" id="invitePanel">
+            <p class="message">Invite code</p>
+            <p class="invite-code" id="inviteCodeValue">-</p>
+            <div class="household-actions">
+              <button id="copyInviteButton" type="button">Copy invite code</button>
+            </div>
+            <p class="helper-text" id="inviteCodeMessage">Share this code with another user.</p>
+          </div>
+        </div>
+
+        <div class="panel-header">
+          <p class="eyebrow">Members</p>
+          <div class="list" id="membersList"></div>
+        </div>
+
+        <div class="panel-header">
+          <p class="eyebrow">Recent Activity</p>
+          <div class="list" id="activityList"></div>
+        </div>
+
+        <div class="sidebar-footer">
+          <button class="secondary" id="signOutButton" type="button">Sign out</button>
+        </div>
+      </aside>
+    </div>
+  </div>
+
+  <div class="composer-backdrop hidden" id="composerBackdrop"></div>
+  <div class="toast-stack" id="toastStack"></div>
+
+  <script src="shopping-app.js"></script>
+</body>
+</html>
+
+
+
+
+
+
+
+
+
