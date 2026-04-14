@@ -1,0 +1,483 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#2563eb">
+  <link rel="manifest" href="shopping-manifest.webmanifest">
+  <link rel="icon" href="shopping-icon.svg" type="image/svg+xml">
+  <title>Shared Shopping List</title>
+  <link rel="stylesheet" href="shopping-app.css">
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="shopping-cloud-config.js"></script>
+  <script src="shopping-auth.js"></script>
+  <script src="shopping-categories.js"></script>
+</head>
+<body>
+
+  <!-- ── Setup screen (shown when no household) ── -->
+  <div class="setup-shell" id="householdPanel">
+    <div class="setup-card">
+      <div class="setup-header">
+        <p class="eyebrow">Shared Shopping</p>
+        <h2>Create or join a household</h2>
+        <p class="subtle">Create your household and you're added automatically. Use the join form only if someone already gave you an invite code.</p>
+      </div>
+
+      <div class="setup-forms">
+        <form id="createHouseholdForm" class="field">
+          <label for="householdName">Household name</label>
+          <input id="householdName" type="text" placeholder="Flat on Oak Street" required>
+          <button type="submit">Create household</button>
+        </form>
+
+        <div class="setup-divider"><span>or join with a code</span></div>
+
+        <form id="joinHouseholdForm" class="field">
+          <label for="inviteCode">Invite code</label>
+          <input id="inviteCode" type="text" placeholder="ABC123" required>
+          <label for="displayName">Your display name</label>
+          <input id="displayName" type="text" placeholder="Jamie" required>
+          <button type="submit">Join household</button>
+        </form>
+      </div>
+
+      <div class="setup-footer">
+        <button class="secondary" id="backToLoginButton" type="button">← Back to login</button>
+        <p class="subtle">If you were logged out after a redeploy, use Back to login to sign in again.</p>
+        <p class="message" id="householdMessage"></p>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Sticky app bar (shown when household exists) ── -->
+  <header class="app-bar hidden" id="appHeader">
+    <div class="app-bar-left">
+      <p class="eyebrow">Shopping</p>
+      <h1 class="app-bar-title" id="householdNameHeading">Household</h1>
+    </div>
+    <div class="app-bar-pills">
+      <span class="pill" id="memberPill">0 members</span>
+      <span class="status-pill warning" id="urgentPill">0 urgent</span>
+      <span class="pill dim" id="estimatePill">Est. NZ$0.00</span>
+      <span class="pill dim app-version-pill">v16.3</span>
+    </div>
+  </header>
+
+  <!-- ── Tab bar ── -->
+  <nav class="tab-bar hidden" id="tabBar">
+    <button class="tab-btn active" data-tab="shopping">🛒 Shopping</button>
+    <button class="tab-btn" data-tab="lists">📋 Lists</button>
+    <button class="tab-btn" data-tab="notes">📝 Notes</button>
+    <button class="tab-btn" data-tab="recipes">📖 Recipes</button>
+    <button class="tab-btn" data-tab="household">📊 Analytics</button>
+  </nav>
+
+  <!-- ── Shopping tab ── -->
+  <section class="tab-pane hidden" id="listPanel">
+    <div class="tab-inner">
+
+      <p class="tab-summary subtle" id="householdSummary"></p>
+
+      <div class="list-toolbar">
+        <div class="view-toggle-row">
+          <button class="vtab active" id="groupViewButton" type="button">Groups</button>
+          <button class="vtab" id="categoryViewButton" type="button">Categories</button>
+        </div>
+        <div class="view-toggle-row">
+          <button class="vtab" id="toggleNotesButton" type="button">Notes</button>
+        </div>
+        <p class="helper-text" id="notepadHint">Items are grouped by meal when added together.</p>
+      </div>
+
+      <!-- Shopping list -->
+      <div class="notepad-shell">
+        <div class="notepad-list" id="shoppingList"></div>
+        <div class="list-empty hidden" id="emptyState">
+          <p class="message" id="emptyMessage">No items here yet.</p>
+        </div>
+      </div>
+
+      <!-- Recently purchased (collapsible) -->
+      <section class="recent-section">
+        <button class="collapse-toggle" id="toggleRecentButton" type="button">Recently purchased</button>
+        <div class="recent-panel hidden" id="recentPanel">
+          <div class="notepad-list recent-list" id="recentShoppingList"></div>
+          <div class="list-empty hidden" id="recentEmptyState">
+            <p class="message" id="recentEmptyMessage">No purchases in the last 4 days.</p>
+          </div>
+        </div>
+      </section>
+
+    </div><!-- /tab-inner -->
+
+    <!-- Add item composer — slides up on mobile -->
+    <section class="composer-card" id="composerCard">
+      <div class="composer-toggle-row">
+        <button id="toggleAddPanelButton" type="button">+ Add item</button>
+      </div>
+
+      <form id="addEntryForm" class="compact-form hidden">
+
+        <div class="field">
+          <label for="itemName">Item name</label>
+          <input id="itemName" type="text" placeholder="Milk" required>
+        </div>
+
+        <div class="field">
+          <label for="itemNote">Note (optional)</label>
+          <input id="itemNote" type="text" placeholder="2 litres, blue cap">
+        </div>
+
+        <div class="composer-options-row">
+          <label class="checkbox-wrap" for="itemUrgent">
+            <input id="itemUrgent" type="checkbox"> Urgent
+          </label>
+          <label class="checkbox-wrap" for="isMealGroup">
+            <input id="isMealGroup" type="checkbox"> Meal bundle
+          </label>
+        </div>
+
+        <div class="meal-fields hidden" id="mealFields">
+          <div class="field">
+            <label for="mealName">Meal bundle name</label>
+            <input id="mealName" type="text" placeholder="Spaghetti bolognese">
+          </div>
+          <div class="field">
+            <label for="mealItems">Items in this meal (one per line)</label>
+            <textarea id="mealItems" rows="4" placeholder="Pasta&#10;Mince&#10;Tomato sauce&#10;Parmesan"></textarea>
+          </div>
+        </div>
+
+        <div class="form-actions">
+          <button type="submit">Save to list</button>
+        </div>
+
+        <!-- Recipe scan -->
+        <section class="recipe-scan-card">
+          <p class="eyebrow">Recipe Scan</p>
+          <p class="subtle">Choose a recipe photo from your camera or gallery.</p>
+          <input id="recipeImageInput" type="file" accept="image/*" class="hidden">
+          <div class="form-actions recipe-scan-actions">
+            <button class="secondary recipe-scan-action-button" id="takeRecipePhotoButton" type="button">Take photo</button>
+            <button class="secondary recipe-scan-action-button" id="chooseRecipeImageButton" type="button">Choose photo</button>
+          </div>
+          <p class="helper-text" id="recipeScanStatus">No recipe image selected yet.</p>
+
+          <div class="recipe-scan-results hidden" id="recipeScanResults">
+            <div class="field">
+              <label for="scannedMealName">Meal name</label>
+              <input id="scannedMealName" type="text" placeholder="Type the meal name if the scan missed it">
+            </div>
+            <div class="field">
+              <label>Review ingredients</label>
+              <p class="helper-text">Edit any names that look off, then untick anything you don't need.</p>
+              <div class="recipe-scan-list" id="recipeScanList"></div>
+            </div>
+            <div class="form-actions">
+              <button id="addScannedRecipeButton" type="button">Add selected ingredients</button>
+              <button class="secondary" id="clearRecipeScanButton" type="button">Clear</button>
+            </div>
+          </div>
+        </section>
+
+        <div class="form-actions">
+          <button class="secondary" id="toggleWoolworthsExportButton" type="button">Show price guide</button>
+        </div>
+
+      </form>
+
+      <!-- Price guide panel -->
+      <section class="notice hidden" id="woolworthsExportPanel">
+        <p class="eyebrow">Price Guide</p>
+        <p class="panel-h3">Estimated NZ prices</p>
+        <p class="subtle">Rough NZD estimates for planning only, adjusted by the latest NZ CPI.</p>
+        <p class="helper-text" id="woolworthsPriceStatus">Estimated using Stats NZ CPI, December 2025 quarter.</p>
+        <div class="list woolworths-export-list" id="woolworthsExportList"></div>
+      </section>
+    </section>
+
+    <!-- FAB -->
+    <button class="mobile-composer-button" id="mobileComposerButton" type="button">+ Add</button>
+  </section>
+
+  <!-- ── Lists tab ── -->
+  <div class="tab-pane hidden" id="listsPane">
+    <div class="tab-inner">
+      <section class="temp-lists-shell">
+        <div class="temp-lists-header">
+          <p class="eyebrow">Temporary Lists</p>
+          <h3>Trips, packing &amp; one-off notes</h3>
+          <p class="subtle">Keep temporary checklists separate from your shared shopping list.</p>
+        </div>
+
+        <form id="tempListForm" class="field temp-list-create-form">
+          <label for="tempListTitle">New temporary list</label>
+          <div class="temp-list-create-row">
+            <input id="tempListTitle" type="text" placeholder="Auckland packing list" required>
+            <button type="submit" class="create-plus-btn" title="Create list">+</button>
+          </div>
+        </form>
+
+        <div class="temp-lists-board" id="tempListsBoard"></div>
+        <div class="list-empty hidden" id="tempListsEmptyState">
+          <p class="message">No temporary lists yet. Create one above for trip packing, reminders, or any short-term checklist.</p>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <!-- ── Notes tab ── -->
+  <div class="tab-pane hidden" id="notesPane">
+    <div class="tab-inner">
+      <div class="notes-shell">
+
+        <div class="notes-header">
+          <p class="eyebrow">Personal Notes</p>
+          <h3>Your private notes</h3>
+          <p class="subtle notes-privacy-hint">🔒 Only you can see these — synced across your devices, never visible to your household.</p>
+        </div>
+
+        <!-- Add note form -->
+        <form class="notes-compose" id="notesForm">
+          <textarea id="noteInput" class="notes-textarea" rows="3" placeholder="Jot something down…"></textarea>
+          <div class="notes-compose-actions">
+            <button type="submit" id="addNoteButton">Add note</button>
+          </div>
+        </form>
+
+        <!-- Notes list -->
+        <div class="notes-list" id="notesList"></div>
+
+        <div class="list-empty hidden" id="notesEmptyState">
+          <p class="message">No notes yet — write something above.</p>
+        </div>
+
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Recipe Books tab ── -->
+  <div class="tab-pane hidden" id="recipeBooksPane">
+    <div class="tab-inner">
+      <div class="recipe-books-shell">
+
+        <div class="recipe-books-header">
+          <p class="eyebrow">Recipe Books</p>
+          <h3>Saved recipes</h3>
+          <p class="subtle">Add ingredients from any recipe directly to your shopping list.</p>
+        </div>
+
+        <!-- Add recipe panel -->
+        <div class="recipe-add-panel">
+          <button id="toggleRecipeAddButton" type="button">+ Add recipe</button>
+
+          <form id="recipeAddForm" class="compact-form hidden">
+            <div class="field">
+              <label for="recipePasteInput">Paste recipe text</label>
+              <textarea id="recipePasteInput" class="recipe-paste-textarea" rows="6"
+                placeholder="Paste a full recipe here — we'll extract the name and ingredients automatically."></textarea>
+            </div>
+            <div class="form-actions">
+              <button type="button" id="parseRecipeButton">Parse recipe</button>
+            </div>
+
+            <div id="recipeParsedPreview" class="hidden">
+              <div class="field">
+                <label for="parsedRecipeName">Recipe name</label>
+                <input id="parsedRecipeName" type="text" placeholder="Recipe name" required>
+              </div>
+              <div class="field">
+                <label>Ingredients found</label>
+                <p class="helper-text">Tick those to save. Edit any names that look off.</p>
+                <div id="parsedIngredientsList" class="parsed-ingredients-list"></div>
+              </div>
+              <div class="form-actions">
+                <button type="submit">Save recipe</button>
+                <button type="button" class="secondary" id="cancelRecipeButton">Cancel</button>
+              </div>
+            </div>
+          </form>
+        </div>
+
+        <!-- Recipe list -->
+        <div id="recipeBooksList" class="recipe-books-list"></div>
+        <div class="list-empty hidden" id="recipeBooksEmptyState">
+          <p class="message">No recipes saved yet — add one above.</p>
+        </div>
+
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Household & Analytics tab ── -->
+  <aside class="tab-pane hidden" id="sidebarPanel">
+    <div class="tab-inner">
+      <div class="household-tab-content">
+
+        <!-- ── Receipt Scanner ── -->
+        <div class="hh-section">
+          <p class="eyebrow">Receipt Scanner</p>
+          <h3 class="hh-section-title">Scan a receipt</h3>
+          <p class="subtle">Upload or photograph a receipt — items are automatically categorised and saved for spending analytics.</p>
+
+          <input id="receiptImageInput" type="file" accept="image/*" class="hidden">
+          <div class="form-actions receipt-upload-actions">
+            <button class="secondary" id="takeReceiptPhotoButton" type="button">Take photo</button>
+            <button class="secondary" id="chooseReceiptImageButton" type="button">Choose image</button>
+          </div>
+          <p class="helper-text" id="receiptScanStatus">No receipt selected yet.</p>
+
+          <div class="receipt-scan-results hidden" id="receiptScanResults">
+            <div class="receipt-meta-grid">
+              <div class="field">
+                <label for="receiptStoreName">Store</label>
+                <input id="receiptStoreName" type="text" placeholder="Countdown, New World…">
+              </div>
+              <div class="field">
+                <label for="receiptDate">Date</label>
+                <input id="receiptDate" type="date">
+              </div>
+              <div class="field">
+                <label for="receiptTotal">Total ($)</label>
+                <input id="receiptTotal" type="number" step="0.01" placeholder="0.00" min="0">
+              </div>
+            </div>
+
+            <div class="field">
+              <p class="field-label">Items detected <span class="helper-text">— edit names/amounts/categories; ★ to track</span></p>
+              <div id="receiptItemsEditor" class="receipt-items-editor"></div>
+            </div>
+
+            <div class="receipt-track-section">
+              <p class="helper-text">Send ★ starred items to tracked list:</p>
+              <div class="receipt-track-row">
+                <select id="receiptTrackListSelect" class="receipt-track-select">
+                  <option value="">— none —</option>
+                </select>
+                <button class="secondary" id="newTrackedListFromReceiptButton" type="button">+ New list</button>
+              </div>
+            </div>
+
+            <div class="form-actions">
+              <button id="saveReceiptButton" type="button">Save receipt</button>
+              <button class="secondary" id="clearReceiptButton" type="button">Clear</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- ── Spending Analytics ── -->
+        <div class="hh-section">
+          <p class="eyebrow">Spending Analytics</p>
+          <h3 class="hh-section-title">Where the money goes</h3>
+
+          <div class="analytics-period-row">
+            <button class="tab active" data-period="30">30 days</button>
+            <button class="tab" data-period="90">90 days</button>
+            <button class="tab" data-period="180">6 months</button>
+            <button class="tab" data-period="365">12 months</button>
+          </div>
+
+          <div id="analyticsContent" class="analytics-content">
+            <p class="helper-text">No receipts scanned yet — scan one above.</p>
+          </div>
+        </div>
+
+        <!-- ── Tracked Lists ── -->
+        <div class="hh-section">
+          <p class="eyebrow">Tracked Lists</p>
+          <h3 class="hh-section-title">Reimbursables &amp; custom tracking</h3>
+          <p class="subtle">Group starred receipt items into named lists — e.g. Airbnb August, Work expenses.</p>
+
+          <form id="newTrackedListForm" class="field">
+            <div class="temp-list-create-row">
+              <input id="newTrackedListTitle" type="text" placeholder="Airbnb August, Work expenses…" required>
+              <button type="submit" class="circle-plus-btn" title="Create list">+</button>
+            </div>
+          </form>
+
+          <div id="trackedListsContent" class="tracked-lists-content"></div>
+          <div class="list-empty hidden" id="trackedListsEmpty">
+            <p class="helper-text">No tracked lists yet — create one above and star items when reviewing a receipt.</p>
+          </div>
+        </div>
+
+        <!-- ── Invite ── -->
+        <div class="hh-section">
+          <p class="eyebrow">Invite</p>
+          <div class="notice invite-toggle-card">
+            <div class="form-actions">
+              <button id="toggleInviteButton" type="button">Show invite code</button>
+            </div>
+            <div class="invite-panel hidden" id="invitePanel">
+              <p class="invite-label">Invite code</p>
+              <p class="invite-code" id="inviteCodeValue">-</p>
+              <div class="form-actions">
+                <button id="copyInviteButton" type="button">Copy code</button>
+              </div>
+              <p class="helper-text" id="inviteCodeMessage">Share this code with another user. They can sign in and join with it.</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="hh-section">
+          <p class="eyebrow">Members</p>
+          <div class="list" id="membersList"></div>
+        </div>
+
+        <div class="hh-section">
+          <p class="eyebrow">Recent Activity</p>
+          <div class="list" id="activityList"></div>
+        </div>
+
+        <div class="hh-section hh-section--footer">
+          <button class="secondary sign-out-btn" id="signOutButton" type="button">Sign out</button>
+        </div>
+
+      </div>
+    </div>
+  </aside>
+
+  <!-- Recipe detail overlay -->
+  <div id="recipeDetailOverlay" class="recipe-detail-overlay hidden">
+    <div class="recipe-detail-card">
+
+      <div class="recipe-detail-head">
+        <div class="recipe-detail-title-wrap">
+          <h3 id="recipeDetailName" class="recipe-detail-title"></h3>
+          <p id="recipeDetailCount" class="helper-text"></p>
+        </div>
+        <button class="secondary recipe-detail-close-btn" id="closeRecipeDetailButton" type="button">✕</button>
+      </div>
+
+      <!-- Full recipe text -->
+      <div id="recipeDetailBodyWrap" class="recipe-detail-body-wrap hidden">
+        <pre id="recipeDetailBody" class="recipe-detail-body"></pre>
+      </div>
+
+      <!-- Ingredient selector for adding to list -->
+      <details id="recipeDetailAddSection" class="recipe-detail-add-section">
+        <summary class="recipe-detail-add-summary">Add to shopping list</summary>
+        <div class="recipe-detail-add-inner">
+          <p class="helper-text">Untick anything you already have at home.</p>
+          <div id="recipeDetailIngredients" class="recipe-detail-ingredients"></div>
+          <div class="form-actions" style="margin-top:10px">
+            <button id="addRecipeToListButton" type="button">Add selected to list</button>
+          </div>
+        </div>
+      </details>
+
+      <div class="form-actions recipe-detail-footer-actions">
+        <button class="secondary" id="deleteRecipeButton" type="button">Delete recipe</button>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- Overlays -->
+  <div class="composer-backdrop hidden" id="composerBackdrop"></div>
+  <div class="toast-stack" id="toastStack"></div>
+
+  <script src="shopping-app.js"></script>
+</body>
+</html>
