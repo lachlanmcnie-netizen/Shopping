@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#1f6f5f">
+  <link rel="manifest" href="shopping-manifest.webmanifest">
+  <link rel="icon" href="shopping-icon.svg" type="image/svg+xml">
+  <title>Shared Shopping List</title>
+  <link rel="stylesheet" href="shopping-app.css">
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="shopping-cloud-config.js"></script>
+  <script src="shopping-auth.js"></script>
+</head>
+<body>
+  <main class="auth-shell">
+    <section class="auth-card">
+      <p class="eyebrow">Shared Household App</p>
+      <h1>Shopping list for everyone at home.</h1>
+      <p class="subtle">Each person can log in with their own email, add items, mark things bought, tag urgent needs, and see recent purchases for 4 days.</p>
+
+      <div class="notice">
+        <p class="message" id="configMessage">Connect this page to Supabase in <code>shopping-cloud-config.js</code> before signing in.</p>
+      </div>
+
+      <div class="split-card">
+        <form id="signInForm" class="field">
+          <h2>Sign In</h2>
+          <label for="signInEmail">Email</label>
+          <input id="signInEmail" type="email" autocomplete="email" required>
+          <label for="signInPassword">Password</label>
+          <input id="signInPassword" type="password" autocomplete="current-password" required>
+          <div class="auth-actions">
+            <button type="submit">Sign in</button>
+          </div>
+        </form>
+
+        <form id="signUpForm" class="field">
+          <h2>Create Account</h2>
+          <label for="signUpName">Display name</label>
+          <input id="signUpName" type="text" autocomplete="name" required>
+          <label for="signUpEmail">Email</label>
+          <input id="signUpEmail" type="email" autocomplete="email" required>
+          <label for="signUpPassword">Password</label>
+          <input id="signUpPassword" type="password" autocomplete="new-password" minlength="6" required>
+          <div class="auth-actions">
+            <button type="submit">Create account</button>
+          </div>
+        </form>
+      </div>
+
+      <p class="message" id="authMessage"></p>
+    </section>
+  </main>
+
+  <script>
+    if ("serviceWorker" in navigator) {
+      navigator.serviceWorker.register("shopping-sw.js").catch(() => {});
+    }
+
+    const configMessage = document.getElementById("configMessage");
+    const authMessage = document.getElementById("authMessage");
+    const signInForm = document.getElementById("signInForm");
+    const signUpForm = document.getElementById("signUpForm");
+
+    function setMessage(text, isError) {
+      authMessage.textContent = text;
+      authMessage.style.color = isError ? "#b14f41" : "#3f7751";
+    }
+
+    async function bootstrap() {
+      if (!window.ShoppingAuth?.hasConfig()) {
+        configMessage.textContent = "Add your Supabase URL and anon key to shopping-cloud-config.js, then refresh this page.";
+        return;
+      }
+
+      configMessage.textContent = "Supabase is connected. Sign in or create an account to continue.";
+
+      const session = await window.ShoppingAuth.getSession();
+      if (session) {
+        window.location.replace("shopping-app.html");
+      }
+    }
+
+    signInForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+
+      try {
+        const client = window.ShoppingAuth.getClient();
+        const email = document.getElementById("signInEmail").value.trim();
+        const password = document.getElementById("signInPassword").value;
+        const { error } = await client.auth.signInWithPassword({ email, password });
+
+        if (error) {
+          throw error;
+        }
+
+        window.location.replace("shopping-app.html");
+      } catch (error) {
+        setMessage(error.message || "Unable to sign in.", true);
+      }
+    });
+
+    signUpForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+
+      try {
+        const client = window.ShoppingAuth.getClient();
+        const email = document.getElementById("signUpEmail").value.trim();
+        const password = document.getElementById("signUpPassword").value;
+        const displayName = document.getElementById("signUpName").value.trim();
+        const { error } = await client.auth.signUp({
+          email,
+          password,
+          options: {
+            data: {
+              display_name: displayName
+            }
+          }
+        });
+
+        if (error) {
+          throw error;
+        }
+
+        setMessage("Account created. If email confirmation is enabled in Supabase, confirm your email and then sign in.", false);
+      } catch (error) {
+        setMessage(error.message || "Unable to create account.", true);
+      }
+    });
+
+    bootstrap().catch((error) => {
+      setMessage(error.message || "Unable to load authentication.", true);
+    });
+  </script>
+</body>
+</html>
