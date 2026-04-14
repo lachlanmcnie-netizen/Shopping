@@ -1,0 +1,16 @@
+﻿{
+  "name": "Shared Shopping List",
+  "short_name": "Shopping",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "background_color": "#f3efe7",
+  "theme_color": "#1f6f5f",
+  "icons": [
+    {
+      "src": "./shopping-icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
