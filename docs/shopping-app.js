@@ -47,7 +47,8 @@
       receiptDate: "",
       totalAmount: null,
       imageName: "",
-      imageFile: null
+      imageFile: null,
+      rawText: ""
     },
     analyticsRange: "current-month",
     analyticsPanel: "scan",
@@ -2295,17 +2296,37 @@
 
   async function refreshApp() {
     await loadMembership();
-    await loadMembers();
-    await loadItems();
-    await loadNotifications();
-    await loadTempLists();
-    try {
-      await loadMemberships();
-    } catch (error) {
-      state.membershipsError = error.message || "Could not load memberships.";
+
+    if (!state.household) {
+      renderHouseholdState();
+      removeChannels();
+      return;
     }
+
+    await Promise.all([
+      loadMembers(),
+      loadItems(),
+      loadNotifications()
+    ]);
+
     renderHouseholdState();
     await subscribeRealtime();
+
+    window.setTimeout(() => {
+      loadTempLists()
+        .then(() => {
+          if (state.activeTab === "notes") renderTempLists();
+        })
+        .catch((error) => showToast(error.message || "Could not load temporary lists."));
+      loadMemberships()
+        .then(() => {
+          if (state.activeTab === "memberships") renderMemberships();
+        })
+        .catch((error) => {
+          state.membershipsError = error.message || "Could not load memberships.";
+          if (state.activeTab === "memberships") renderMemberships();
+        });
+    }, 0);
   }
 
   function wireQuickAddButtons() {
@@ -2688,9 +2709,17 @@
       tracked: false,
       category: item.category || categoryMatcher.categorizeItem(item.name) || "Other"
     }));
+    state.receiptScan.rawText = String(payload.rawText || payload.text || "");
+    const scannedDateText = payload.rawReceiptDate
+      || payload.receiptDateText
+      || findReceiptDateInText(state.receiptScan.rawText)
+      || payload.receiptDate
+      || "";
+    const normalizedReceiptDate = normalizeReceiptDateValue(scannedDateText);
+    state.receiptScan.receiptDate = normalizedReceiptDate;
 
     if (elements.receiptStoreName) elements.receiptStoreName.value = payload.storeName || "";
-    if (elements.receiptDate) elements.receiptDate.value = payload.receiptDate || "";
+    if (elements.receiptDate) elements.receiptDate.value = normalizedReceiptDate;
     if (elements.receiptTotal) elements.receiptTotal.value = payload.totalAmount != null ? payload.totalAmount : "";
 
     renderReceiptScanResults();
@@ -2834,8 +2863,9 @@
     if (!includedItems.length) throw new Error("No items to save — check at least one item.");
 
     const storeName = elements.receiptStoreName?.value.trim() || null;
-    let receiptDate = elements.receiptDate?.value || "";
-    if (!isValidDateInputValue(receiptDate)) {
+    let receiptDate = normalizeReceiptDateValue(elements.receiptDate?.value || "");
+    if (receiptDate && elements.receiptDate) elements.receiptDate.value = receiptDate;
+    if (!receiptDate) {
       showToast("Please enter the receipt date before saving.");
       const enteredDate = promptForReceiptDate();
       if (!enteredDate) {
@@ -2860,7 +2890,7 @@
     const { data: receipt, error: recErr } = await state.client
       .from("shopping_receipts")
       .insert({ household_id: state.household.id, uploaded_by: state.session.user.id, store_name: storeName, receipt_date: receiptDate, total_amount: totalAmount, image_path: imagePath })
-      .select("id")
+      .select("id, store_name, receipt_date, total_amount, image_path, uploaded_by, created_at")
       .single();
     if (recErr) throw recErr;
 
@@ -2876,10 +2906,11 @@
     }));
     const { data: savedItems, error: itemsErr } = await state.client.from("shopping_receipt_items").insert(
       receiptItemPayload
-    ).select("id, item_name");
+    ).select("id, receipt_id, item_name, line_total, quantity, category");
     if (itemsErr) throw itemsErr;
 
     const trackedListId = elements.receiptTrackListSelect?.value;
+    const saveWarnings = [];
     if (trackedListId && starredItems.length) {
       const trackPayload = starredItems.map((i) => ({
         tracked_list_id: trackedListId,
@@ -2889,19 +2920,34 @@
         created_by: state.session.user.id
       }));
       const { error: trackErr } = await state.client.from("shopping_tracked_list_items").insert(trackPayload);
-      if (trackErr) throw trackErr;
+      if (trackErr) saveWarnings.push("Tracked items were not added.");
     }
 
-    state.receiptScan = { items: [], storeName: "", receiptDate: "", totalAmount: null, imageName: "", imageFile: null };
+    state.receiptScan = { items: [], storeName: "", receiptDate: "", totalAmount: null, imageName: "", imageFile: null, rawText: "" };
     if (elements.receiptScanResults) elements.receiptScanResults.classList.add("hidden");
     if (elements.receiptScanStatus) elements.receiptScanStatus.textContent = "Receipt saved successfully.";
 
-    await Promise.all([loadReceipts(), loadTrackedLists()]);
+    const savedReceipt = {
+      ...receipt,
+      items: savedItems || []
+    };
+    state.receipts = [
+      savedReceipt,
+      ...state.receipts.filter((existingReceipt) => existingReceipt.id !== receipt.id)
+    ].slice(0, RECEIPT_HISTORY_LIMIT);
+
+    try {
+      await Promise.all([loadReceipts(), loadTrackedLists()]);
+    } catch (refreshError) {
+      saveWarnings.push("Dashboard refresh failed; refresh the page if it does not appear.");
+    }
     renderAnalytics();
     renderPastReceipts();
     renderItemInformation();
     renderTrackedLists();
-    showToast(`Receipt from ${storeName || "unknown store"} saved.`);
+    showToast(saveWarnings.length
+      ? `Receipt from ${storeName || "unknown store"} saved. ${saveWarnings.join(" ")}`
+      : `Receipt from ${storeName || "unknown store"} saved.`);
   }
 
   /* ── Receipt / analytics loading ─────────────────────────── */
@@ -3030,24 +3076,135 @@
     return Number.isFinite(date.getTime()) && toDateInputValue(date) === value;
   }
 
-  function promptForReceiptDate(message = "No receipt date was detected. Enter the receipt date (YYYY-MM-DD):") {
+  function normalizeTwoDigitReceiptYear(yearText) {
+    const year = parseInt(yearText, 10);
+    if (String(yearText).length !== 2) return year;
+    return year >= 70 ? 1900 + year : 2000 + year;
+  }
+
+  function isReasonableReceiptYear(year) {
+    const currentYear = new Date().getFullYear();
+    return year >= currentYear - 30 && year <= currentYear + 1;
+  }
+
+  function buildReceiptDateValue(year, month, day) {
+    if (!isReasonableReceiptYear(year)) return "";
+    const date = new Date(year, month - 1, day);
+    if (!Number.isFinite(date.getTime())) return "";
+    if (date.getFullYear() !== year || date.getMonth() !== month - 1 || date.getDate() !== day) return "";
+    return toDateInputValue(date);
+  }
+
+  function normalizeReceiptDateValue(value, options = {}) {
+    const raw = String(value || "").trim();
+    if (!raw) return "";
+    if (isValidDateInputValue(raw)) return raw;
+
+    const isoLike = raw.match(/^(\d{4})[\/.-](\d{1,2})[\/.-](\d{1,2})$/);
+    if (isoLike) {
+      return buildReceiptDateValue(
+        parseInt(isoLike[1], 10),
+        parseInt(isoLike[2], 10),
+        parseInt(isoLike[3], 10)
+      );
+    }
+
+    const numeric = raw.match(/^(\d{1,2})\s*[\/.-]\s*(\d{1,2})\s*[\/.-]\s*(\d{2,4})$/);
+    if (numeric) {
+      const first = parseInt(numeric[1], 10);
+      const second = parseInt(numeric[2], 10);
+      const year = normalizeTwoDigitReceiptYear(numeric[3]);
+      const dayFirst = buildReceiptDateValue(year, second, first);
+      const monthFirst = buildReceiptDateValue(year, first, second);
+      if (first > 12) return dayFirst;
+      if (second > 12) return monthFirst;
+      if (options.preferMonthFirst && monthFirst) return monthFirst;
+      return dayFirst || monthFirst || "";
+    }
+
+    const monthNames = {
+      jan: 1, january: 1,
+      feb: 2, february: 2,
+      mar: 3, march: 3,
+      apr: 4, april: 4,
+      may: 5,
+      jun: 6, june: 6,
+      jul: 7, july: 7,
+      aug: 8, august: 8,
+      sep: 9, sept: 9, september: 9,
+      oct: 10, october: 10,
+      nov: 11, november: 11,
+      dec: 12, december: 12
+    };
+    const dayMonthName = raw.match(/^(\d{1,2})(?:st|nd|rd|th)?\s+([A-Za-z]{3,9})\.?,?\s+(\d{2,4})$/i);
+    if (dayMonthName) {
+      const month = monthNames[dayMonthName[2].toLowerCase()];
+      if (!month) return "";
+      return buildReceiptDateValue(
+        normalizeTwoDigitReceiptYear(dayMonthName[3]),
+        month,
+        parseInt(dayMonthName[1], 10)
+      );
+    }
+    const monthNameDay = raw.match(/^([A-Za-z]{3,9})\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{2,4})$/i);
+    if (monthNameDay) {
+      const month = monthNames[monthNameDay[1].toLowerCase()];
+      if (!month) return "";
+      return buildReceiptDateValue(
+        normalizeTwoDigitReceiptYear(monthNameDay[3]),
+        month,
+        parseInt(monthNameDay[2], 10)
+      );
+    }
+
+    return "";
+  }
+
+  function findReceiptDateInText(text) {
+    const candidates = String(text || "").match(/\b(?:\d{4}[\/.-]\d{1,2}[\/.-]\d{1,2}|\d{1,2}[\/.-]\d{1,2}[\/.-]\d{2,4}|\d{1,2}(?:st|nd|rd|th)?\s+[A-Za-z]{3,9}\.?,?\s+\d{2,4}|[A-Za-z]{3,9}\.?\s+\d{1,2}(?:st|nd|rd|th)?,?\s+\d{2,4})\b/gi) || [];
+    for (const candidate of candidates) {
+      const normalized = normalizeReceiptDateValue(candidate);
+      if (normalized) return normalized;
+    }
+    return "";
+  }
+
+  function formatReceiptDateForInput(dateString) {
+    const normalized = normalizeReceiptDateValue(dateString);
+    if (!normalized) return "";
+    const [year, month, day] = normalized.split("-");
+    return `${day}/${month}/${year}`;
+  }
+
+  function promptForReceiptDate(message = "No receipt date was detected. Enter the receipt date (DD/MM/YYYY or YYYY-MM-DD):") {
     const entered = window.prompt(message, "");
     if (!entered) return "";
     const trimmed = entered.trim();
-    if (!isValidDateInputValue(trimmed)) {
-      showToast("Please enter the date as YYYY-MM-DD.");
+    const normalized = normalizeReceiptDateValue(trimmed);
+    if (!normalized) {
+      showToast("Please enter a valid receipt date.");
       return "";
     }
-    return trimmed;
+    return normalized;
   }
 
   function formatReceiptDate(dateString) {
     if (!dateString) return "No receipt date";
-    return new Date(`${dateString}T00:00:00`).toLocaleDateString([], {
+    return new Date(`${dateString}T00:00:00`).toLocaleDateString("en-NZ", {
       day: "numeric",
       month: "short",
       year: "numeric"
     });
+  }
+
+  function renderReceiptDateEditor(receipt) {
+    const receiptDate = normalizeReceiptDateValue(receipt.receipt_date);
+    return `
+            <label class="analytics-receipt-date-edit">
+              <span>Date</span>
+              <input class="analytics-receipt-date-input" type="text" inputmode="numeric" placeholder="DD/MM/YYYY" value="${escapeHtml(formatReceiptDateForInput(receiptDate))}" data-original-value="${escapeHtml(receiptDate)}" aria-label="Receipt date">
+              <button class="secondary analytics-receipt-date-save" type="button" data-receipt-id="${escapeHtml(receipt.id)}" disabled>Save</button>
+            </label>`;
   }
 
   function addTrackedDetailLine(container, label, value) {
@@ -3702,19 +3859,20 @@
   }
 
   async function saveReceiptDate(receiptId, receiptDate) {
-    if (!isValidDateInputValue(receiptDate)) {
+    const normalizedReceiptDate = normalizeReceiptDateValue(receiptDate);
+    if (!normalizedReceiptDate) {
       throw new Error("Enter a valid receipt date.");
     }
 
     const { error: receiptError } = await state.client
       .from("shopping_receipts")
-      .update({ receipt_date: receiptDate })
+      .update({ receipt_date: normalizedReceiptDate })
       .eq("id", receiptId);
     if (receiptError) throw receiptError;
 
     const { error: itemsError } = await state.client
       .from("shopping_receipt_items")
-      .update({ receipt_date: receiptDate })
+      .update({ receipt_date: normalizedReceiptDate })
       .eq("receipt_id", receiptId);
     if (itemsError) throw itemsError;
 
@@ -3722,8 +3880,8 @@
       receipt.id === receiptId
         ? {
             ...receipt,
-            receipt_date: receiptDate,
-            items: (receipt.items || []).map((item) => ({ ...item, receipt_date: receiptDate }))
+            receipt_date: normalizedReceiptDate,
+            items: (receipt.items || []).map((item) => ({ ...item, receipt_date: normalizedReceiptDate }))
           }
         : receipt
     ));
@@ -3732,7 +3890,7 @@
       ...list,
       items: (list.items || []).map((item) => (
         item.receipt?.id === receiptId
-          ? { ...item, purchase_date: receiptDate, receipt: { ...item.receipt, receipt_date: receiptDate } }
+          ? { ...item, purchase_date: normalizedReceiptDate, receipt: { ...item.receipt, receipt_date: normalizedReceiptDate } }
           : item
       ))
     }));
@@ -3824,7 +3982,7 @@
     }).join("");
 
     const receiptsHtml = receipts.map((r) => {
-      const dateStr = r.receipt_date ? new Date(r.receipt_date + "T00:00:00").toLocaleDateString([], { day: "numeric", month: "short", year: "numeric" }) : "No date";
+      const dateStr = formatReceiptDate(r.receipt_date);
       const itemsHtml = (r.items || []).map((item) => renderAnalyticsEditableItem(item)).join("");
       const expandedClass = state.analyticsOpenReceiptIds.has(r.id) ? "" : " hidden";
       return `
@@ -3832,11 +3990,7 @@
           <div class="analytics-receipt-copy">
             <span class="analytics-receipt-store">${escapeHtml(r.store_name || "Unknown store")}</span>
             <span class="helper-text" style="font-size:0.78rem">${dateStr} - ${(r.items || []).length} items</span>
-            <label class="analytics-receipt-date-edit">
-              <span>Date</span>
-              <input class="analytics-receipt-date-input" type="date" value="${escapeHtml(r.receipt_date || "")}" data-original-value="${escapeHtml(r.receipt_date || "")}" aria-label="Receipt date">
-              <button class="secondary analytics-receipt-date-save" type="button" data-receipt-id="${escapeHtml(r.id)}" disabled>Save</button>
-            </label>
+            ${renderReceiptDateEditor(r)}
           </div>
           <span class="analytics-receipt-total">${formatCurrency(r.total_amount || 0)}</span>
           ${r.image_path ? `<button class="secondary analytics-icon-btn analytics-view-btn" data-receipt-id="${escapeHtml(r.id)}" type="button" title="View receipt image" aria-label="View receipt image"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6-10-6-10-6Z"/><circle cx="12" cy="12" r="3"/></svg></button>` : `<span class="analytics-receipt-action-spacer"></span>`}
@@ -3876,7 +4030,7 @@
     });
     elements.analyticsContent.querySelectorAll(".analytics-receipt-row").forEach((row) => {
       row.addEventListener("click", (e) => {
-        if (e.target.closest("button")) return;
+        if (e.target.closest("button,input,select,label")) return;
         const el = document.getElementById(`ri-${row.dataset.receiptId}`);
         if (!el) return;
         el.classList.toggle("hidden");
@@ -3887,6 +4041,7 @@
         }
       });
     });
+    wireReceiptDateEditors(elements.analyticsContent);
     elements.analyticsContent.querySelectorAll(".analytics-receipt-item").forEach((row) => {
       const nameInput = row.querySelector(".analytics-receipt-item-name");
       const categorySelect = row.querySelector(".analytics-receipt-item-category");
@@ -4029,7 +4184,7 @@
     }
 
     const receiptsHtml = receipts.map((r) => {
-      const dateStr = r.receipt_date ? new Date(r.receipt_date + "T00:00:00").toLocaleDateString([], { day: "numeric", month: "short", year: "numeric" }) : "No date";
+      const dateStr = formatReceiptDate(r.receipt_date);
       const itemsHtml = (r.items || []).map((item) => renderAnalyticsEditableItem(item)).join("");
       const expandedClass = state.analyticsOpenReceiptIds.has(r.id) ? "" : " hidden";
       return `
@@ -4037,6 +4192,7 @@
           <div class="analytics-receipt-copy">
             <span class="analytics-receipt-store">${escapeHtml(r.store_name || "Unknown store")}</span>
             <span class="helper-text" style="font-size:0.78rem">${dateStr} - ${(r.items || []).length} items</span>
+            ${renderReceiptDateEditor(r)}
           </div>
           <span class="analytics-receipt-total">${formatCurrency(r.total_amount || 0)}</span>
           ${r.image_path ? `<button class="secondary analytics-icon-btn analytics-view-btn" data-receipt-id="${escapeHtml(r.id)}" type="button" title="View receipt image" aria-label="View receipt image"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6-10-6-10-6Z"/><circle cx="12" cy="12" r="3"/></svg></button>` : `<span class="analytics-receipt-action-spacer"></span>`}
@@ -4047,6 +4203,41 @@
 
     elements.pastReceiptsContent.innerHTML = `<div class="analytics-receipts-list">${receiptsHtml}</div>`;
     wireReceiptPanels(elements.pastReceiptsContent);
+  }
+
+  function wireReceiptDateEditors(container) {
+    container.querySelectorAll(".analytics-receipt-date-edit").forEach((wrap) => {
+      const input = wrap.querySelector(".analytics-receipt-date-input");
+      const button = wrap.querySelector(".analytics-receipt-date-save");
+      if (!input || !button) return;
+      input.addEventListener("input", () => {
+        const normalized = normalizeReceiptDateValue(input.value);
+        button.disabled = !normalized || normalized === input.dataset.originalValue;
+      });
+      button.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        const normalized = normalizeReceiptDateValue(input.value);
+        if (!normalized) {
+          showToast("Enter a valid receipt date.");
+          input.focus();
+          return;
+        }
+        button.disabled = true;
+        button.textContent = "Saving";
+        try {
+          await saveReceiptDate(button.dataset.receiptId, normalized);
+          showToast("Receipt date updated.");
+          renderPastReceipts();
+          renderAnalytics();
+          renderTrackedLists();
+          renderItemInformation();
+        } catch (err) {
+          showToast(err.message || "Could not update receipt date.");
+          button.disabled = false;
+          button.textContent = "Save";
+        }
+      });
+    });
   }
 
   function wireReceiptPanels(container) {
@@ -4064,36 +4255,7 @@
       });
     });
 
-    container.querySelectorAll(".analytics-receipt-date-edit").forEach((wrap) => {
-      const input = wrap.querySelector(".analytics-receipt-date-input");
-      const button = wrap.querySelector(".analytics-receipt-date-save");
-      if (!input || !button) return;
-      input.addEventListener("input", () => {
-        button.disabled = input.value === input.dataset.originalValue;
-      });
-      button.addEventListener("click", async (e) => {
-        e.stopPropagation();
-        if (!isValidDateInputValue(input.value)) {
-          showToast("Enter a valid receipt date.");
-          input.focus();
-          return;
-        }
-        button.disabled = true;
-        button.textContent = "Saving";
-        try {
-          await saveReceiptDate(button.dataset.receiptId, input.value);
-          showToast("Receipt date updated.");
-          renderPastReceipts();
-          renderAnalytics();
-          renderTrackedLists();
-          renderItemInformation();
-        } catch (err) {
-          showToast(err.message || "Could not update receipt date.");
-          button.disabled = false;
-          button.textContent = "Save";
-        }
-      });
-    });
+    wireReceiptDateEditors(container);
 
     container.querySelectorAll(".analytics-receipt-item").forEach((row) => {
       const nameInput = row.querySelector(".analytics-receipt-item-name");
@@ -5625,7 +5787,7 @@
     }
     if (elements.clearReceiptButton) {
       elements.clearReceiptButton.addEventListener("click", () => {
-        state.receiptScan = { items: [], storeName: "", receiptDate: "", totalAmount: null, imageName: "", imageFile: null };
+        state.receiptScan = { items: [], storeName: "", receiptDate: "", totalAmount: null, imageName: "", imageFile: null, rawText: "" };
         if (elements.receiptScanResults) elements.receiptScanResults.classList.add("hidden");
         if (elements.receiptScanStatus) elements.receiptScanStatus.textContent = "No receipt selected.";
       });

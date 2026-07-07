@@ -84,8 +84,14 @@
 
     signInForm.addEventListener("submit", async (event) => {
       event.preventDefault();
+      const submitButton = signInForm.querySelector("button[type='submit']");
 
       try {
+        if (submitButton) {
+          submitButton.disabled = true;
+          submitButton.textContent = "Signing in...";
+        }
+        setMessage("Signing in...", false);
         const client = window.ShoppingAuth.getClient();
         const email = document.getElementById("signInEmail").value.trim();
         const password = document.getElementById("signInPassword").value;
@@ -98,6 +104,10 @@
         window.location.replace("shopping-app.html");
       } catch (error) {
         setMessage(error.message || "Unable to sign in.", true);
+        if (submitButton) {
+          submitButton.disabled = false;
+          submitButton.textContent = "Sign in";
+        }
       }
     });
 
