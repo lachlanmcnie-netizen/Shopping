@@ -58,6 +58,7 @@
     trackedListRange: "current-financial-year",
     trackedReportOpenIds: new Set(),
     recipes: [],
+    recipeDrafts: [],
     showNotes: false,
     recipeSearch: "",
     notesPanel: "notes",
@@ -4624,6 +4625,61 @@
     return { name: cleanIngredientName(cleaned), quantity: "" };
   }
 
+  function isRecipeIngredientHeader(line) {
+    return /^ingredients?\s*[:\-\u2013\u2014]?$/i.test(String(line || "").trim());
+  }
+
+  function isRecipeMetaLine(line) {
+    return /^(serves?|prep|cook|total|yield|time|rating|difficulty|calories|nutrition)\b/i.test(String(line || "").trim());
+  }
+
+  function cleanRecipeName(rawName) {
+    return String(rawName || "")
+      .replace(/^recipe\s*\d+\s*[:\.\)\-\u2013\u2014]?\s*/i, "")
+      .replace(/^#+\s*/, "")
+      .trim();
+  }
+
+  function splitRecipeText(text) {
+    const normalized = String(text || "").replace(/\r\n/g, "\n").trim();
+    if (!normalized) return [];
+
+    const lines = normalized.split("\n");
+    const headerIndices = [];
+    lines.forEach((line, index) => {
+      if (isRecipeIngredientHeader(line)) headerIndices.push(index);
+    });
+
+    if (headerIndices.length <= 1) {
+      return [normalized];
+    }
+
+    const starts = headerIndices.map((headerIndex) => {
+      let titleIndex = headerIndex - 1;
+      while (titleIndex > 0 && !lines[titleIndex].trim()) titleIndex -= 1;
+      while (titleIndex > 0 && isRecipeMetaLine(lines[titleIndex])) titleIndex -= 1;
+      return Math.max(0, titleIndex);
+    });
+
+    return starts
+      .map((start, index) => {
+        const end = starts[index + 1] ?? lines.length;
+        return lines.slice(start, end).join("\n").trim();
+      })
+      .filter(Boolean);
+  }
+
+  function parseRecipeBatchText(text) {
+    const parsed = splitRecipeText(text)
+      .map((chunk) => parseRecipeText(chunk))
+      .filter((recipe) => recipe.ingredients.length);
+
+    if (parsed.length) return parsed;
+
+    const fallback = parseRecipeText(text);
+    return fallback.ingredients.length ? [fallback] : [];
+  }
+
   function parseRecipeText(text) {
     const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
     if (!lines.length) return { name: "", ingredients: [] };
@@ -4668,7 +4724,7 @@
     // Append optional ingredients with a flag so the UI can show them differently
     optionalIngredients.forEach((i) => ingredients.push({ ...i, optional: true }));
 
-    return { name: recipeName, ingredients, body: text.trim() };
+    return { name: cleanRecipeName(recipeName), ingredients, body: text.trim() };
   }
 
   async function loadRecipes() {
@@ -5076,9 +5132,13 @@
   }
 
   function resetRecipeAddForm() {
+    state.recipeDrafts = [];
     elements.recipePasteInput.value = "";
+    if (elements.parsedRecipeName) elements.parsedRecipeName.closest(".field")?.classList.remove("hidden");
+    if (elements.parsedRecipeName) elements.parsedRecipeName.required = true;
     elements.parsedIngredientsList.innerHTML = "";
     elements.recipeParsedPreview.classList.add("hidden");
+    delete elements.recipeAddForm.dataset.body;
     if (elements.recipeBookScanStatus) elements.recipeBookScanStatus.textContent = "";
     if (elements.recipeUrlStatus) elements.recipeUrlStatus.textContent = "";
     if (elements.recipeUrlInput) elements.recipeUrlInput.value = "";
@@ -5122,7 +5182,7 @@
     });
 
     // ── Shared parse helper ────────────────────────────────
-    function applyParsedRecipe(text) {
+    function applySingleParsedRecipeLegacy(text) {
       const parsed = parseRecipeText(text);
       elements.parsedRecipeName.value = parsed.name;
       elements.recipeAddForm.dataset.body = parsed.body;
@@ -5167,6 +5227,132 @@
     }
 
     // ── Paste: parse button ────────────────────────────────
+    function buildParsedIngredientRow(ing) {
+      const row = document.createElement("label");
+      row.className = "recipe-ingredient-row";
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.checked = !ing.optional;
+      row.appendChild(cb);
+      if (ing.quantity) {
+        const qty = document.createElement("span");
+        qty.className = "recipe-ingredient-qty";
+        qty.textContent = ing.quantity;
+        row.appendChild(qty);
+      }
+      const input = document.createElement("input");
+      input.type = "text";
+      input.className = "parsed-ingredient-input";
+      input.value = ing.name;
+      input.dataset.quantity = ing.quantity || "";
+      row.appendChild(input);
+      if (ing.optional) {
+        const optTag = document.createElement("span");
+        optTag.className = "recipe-optional-tag";
+        optTag.textContent = "optional";
+        row.appendChild(optTag);
+      }
+      return row;
+    }
+
+    function applyParsedRecipe(text) {
+      const parsedRecipes = parseRecipeBatchText(text);
+      elements.parsedIngredientsList.innerHTML = "";
+      state.recipeDrafts = parsedRecipes;
+
+      if (!parsedRecipes.length) {
+        showToast("No ingredients found - check the text and try again.");
+        return false;
+      }
+
+      const isBatch = parsedRecipes.length > 1;
+      elements.parsedRecipeName.closest(".field")?.classList.toggle("hidden", isBatch);
+      elements.parsedRecipeName.required = !isBatch;
+      elements.recipeAddForm.dataset.body = parsedRecipes[0]?.body || "";
+
+      if (!isBatch) {
+        const parsed = parsedRecipes[0];
+        elements.parsedRecipeName.value = parsed.name;
+        parsed.ingredients.forEach((ing) => {
+          elements.parsedIngredientsList.appendChild(buildParsedIngredientRow(ing));
+        });
+      } else {
+        const summary = document.createElement("p");
+        summary.className = "helper-text parsed-recipe-batch-summary";
+        summary.textContent = `Found ${parsedRecipes.length} recipes. Review each title and ingredient list, then save them together.`;
+        elements.parsedIngredientsList.appendChild(summary);
+
+        parsedRecipes.forEach((recipe, recipeIndex) => {
+          const card = document.createElement("section");
+          card.className = "parsed-recipe-card";
+          card.dataset.recipeIndex = String(recipeIndex);
+
+          const titleLabel = document.createElement("label");
+          titleLabel.className = "field parsed-recipe-title-field";
+          const titleText = document.createElement("span");
+          titleText.textContent = `Recipe ${recipeIndex + 1} name`;
+          const titleInput = document.createElement("input");
+          titleInput.type = "text";
+          titleInput.className = "parsed-recipe-name-input";
+          titleInput.value = recipe.name || `Recipe ${recipeIndex + 1}`;
+          titleLabel.appendChild(titleText);
+          titleLabel.appendChild(titleInput);
+          card.appendChild(titleLabel);
+
+          const ingredients = document.createElement("div");
+          ingredients.className = "parsed-recipe-card-ingredients";
+          recipe.ingredients.forEach((ing) => {
+            ingredients.appendChild(buildParsedIngredientRow(ing));
+          });
+          card.appendChild(ingredients);
+          elements.parsedIngredientsList.appendChild(card);
+        });
+      }
+
+      elements.recipeParsedPreview.classList.remove("hidden");
+      elements.recipeParsedPreview.scrollIntoView({ behavior: "smooth", block: "start" });
+      return true;
+    }
+
+    function collectRecipeDraftsFromPreview() {
+      if (state.recipeDrafts.length > 1) {
+        return [...elements.parsedIngredientsList.querySelectorAll(".parsed-recipe-card")].map((card) => {
+          const draft = state.recipeDrafts[parseInt(card.dataset.recipeIndex || "0", 10)] || {};
+          const name = card.querySelector(".parsed-recipe-name-input")?.value.trim() || draft.name || "Recipe";
+          const ingredients = [...card.querySelectorAll(".recipe-ingredient-row")].map((row) => {
+            const cb = row.querySelector("input[type='checkbox']");
+            const nameInput = row.querySelector(".parsed-ingredient-input");
+            if (!cb || !cb.checked || !nameInput) return null;
+            const ingName = nameInput.value.trim();
+            if (!ingName) return null;
+            return {
+              name: ingName,
+              quantity: nameInput.dataset.quantity || "",
+              optional: row.querySelector(".recipe-optional-tag") ? true : undefined
+            };
+          }).filter(Boolean);
+          return { name, ingredients, body: draft.body || "" };
+        }).filter((recipe) => recipe.name && recipe.ingredients.length);
+      }
+
+      const name = elements.parsedRecipeName.value.trim();
+      const ingredients = [...elements.parsedIngredientsList.querySelectorAll(".recipe-ingredient-row")].map((row) => {
+        const cb = row.querySelector("input[type='checkbox']");
+        const nameInput = row.querySelector(".parsed-ingredient-input");
+        if (!cb || !cb.checked || !nameInput) return null;
+        const ingName = nameInput.value.trim();
+        if (!ingName) return null;
+        return {
+          name: ingName,
+          quantity: nameInput.dataset.quantity || "",
+          optional: row.querySelector(".recipe-optional-tag") ? true : undefined
+        };
+      }).filter(Boolean);
+      return name && ingredients.length
+        ? [{ name, ingredients, body: state.recipeDrafts[0]?.body || elements.recipeAddForm.dataset.body || "" }]
+        : [];
+    }
+
     if (elements.parseRecipeButton) {
       elements.parseRecipeButton.addEventListener("click", () => {
         const text = elements.recipePasteInput.value.trim();
@@ -5299,34 +5485,24 @@
 
     elements.recipeAddForm.addEventListener("submit", async (e) => {
       e.preventDefault();
-      const name = elements.parsedRecipeName.value.trim();
-      if (!name) { showToast("Enter a recipe name."); return; }
+      const drafts = collectRecipeDraftsFromPreview();
+      if (!drafts.length) {
+        showToast("Review at least one recipe with selected ingredients.");
+        return;
+      }
 
-      const rows = elements.parsedIngredientsList.querySelectorAll(".recipe-ingredient-row");
-      const ingredients = [];
-      rows.forEach((row) => {
-        const cb = row.querySelector("input[type='checkbox']");
-        const nameInput = row.querySelector(".parsed-ingredient-input");
-        if (!cb || !cb.checked || !nameInput) return;
-        const ingName = nameInput.value.trim();
-        if (!ingName) return;
-        ingredients.push({ name: ingName, quantity: nameInput.dataset.quantity || "", optional: row.querySelector(".recipe-optional-tag") ? true : undefined });
-      });
-
-      if (!ingredients.length) { showToast("Select at least one ingredient."); return; }
-
-      const body = elements.recipeAddForm.dataset.body || "";
       try {
-        await saveRecipe(name, ingredients, body);
+        for (const draft of drafts) {
+          await saveRecipe(draft.name, draft.ingredients, draft.body);
+        }
         await loadRecipes();
         renderRecipeBooks();
-        showToast(`"${name}" saved.`);
-        elements.recipeAddForm.reset();
-        elements.recipeParsedPreview.classList.add("hidden");
+        showToast(drafts.length === 1 ? `"${drafts[0].name}" saved.` : `${drafts.length} recipes saved.`);
+        resetRecipeAddForm();
         elements.recipeAddForm.classList.add("hidden");
         elements.toggleRecipeAddButton.textContent = "+ Add recipe";
       } catch (err) {
-        showToast(err.message || "Could not save recipe.");
+        showToast(err.message || "Could not save recipes.");
       }
     });
 

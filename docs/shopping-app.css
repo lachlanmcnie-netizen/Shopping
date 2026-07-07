@@ -2240,6 +2240,32 @@ button.secondary:hover { background: var(--surface-muted); }
 }
 
 /* ─── Recipe detail overlay ─────────────────────────────── */
+.parsed-recipe-batch-summary {
+  padding: 4px 2px 8px;
+}
+
+.parsed-recipe-card {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: #fff;
+}
+
+.parsed-recipe-title-field {
+  margin: 0;
+}
+
+.parsed-recipe-card-ingredients {
+  display: grid;
+  gap: 0;
+}
+
+.parsed-recipe-card + .parsed-recipe-card {
+  margin-top: 8px;
+}
+
 .recipe-detail-overlay {
   position: fixed;
   inset: 0;
