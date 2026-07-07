@@ -1,10 +1,20 @@
 
 (function () {
   const RECENT_DAYS = 4;
+  const RECENT_ITEM_QUERY_DAYS = 5;
+  const RECEIPT_HISTORY_DAYS = 450;
+  const RECEIPT_HISTORY_LIMIT = 120;
+  const TRACKED_ITEM_LIMIT = 600;
+  const TEMP_LIST_LIMIT = 40;
+  const TEMP_LIST_ITEM_LIMIT = 500;
+  const RECIPE_LIMIT = 200;
+  const PERSONAL_NOTE_LIMIT = 250;
+  const REALTIME_RELOAD_DELAY_MS = 800;
   const NZ_CPI_MULTIPLIER = 1.035;
   const NZ_CPI_LABEL = "Stats NZ CPI, December 2025 quarter";
   const RECIPE_SCAN_SKIP_WORDS = ["ingredients", "method", "directions", "instructions", "prep", "cook", "serves", "nutrition", "notes", "tip", "tips", "for the", "to serve", "heat", "oven", "bake", "fry", "stir", "mix", "minutes", "minute", "hours", "hour", "temperature"];
   const RECIPE_SCAN_UNITS = ["g", "kg", "ml", "l", "cup", "cups", "tbsp", "tsp", "teaspoon", "teaspoons", "tablespoon", "tablespoons", "clove", "cloves", "can", "cans", "tin", "tins", "packet", "packets", "bunch", "bunches", "slice", "slices", "pinch", "pinches", "sprig", "sprigs", "handful", "handfuls", "dash", "dashes"];
+  const SHOPPING_ITEM_COLUMNS = "id, household_id, name, note, is_urgent, is_purchased, purchased_at, created_by, purchased_by, created_at, updated_at, meal_group, meal_item_order";
 
   const state = {
     client: null,
@@ -17,6 +27,7 @@
     view: "active",
     listMode: "groups",
     channels: [],
+    reloadTimers: {},
     recipeScan: {
       items: [],
       mealName: "",
@@ -396,6 +407,29 @@
 
   function recentCutoff() {
     return Date.now() - RECENT_DAYS * 24 * 60 * 60 * 1000;
+  }
+
+  function daysAgoIso(days) {
+    return new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+  }
+
+  function daysAgoDateValue(days) {
+    return daysAgoIso(days).slice(0, 10);
+  }
+
+  function scheduleReload(key, task, delay = REALTIME_RELOAD_DELAY_MS) {
+    if (state.reloadTimers[key]) {
+      window.clearTimeout(state.reloadTimers[key]);
+    }
+
+    state.reloadTimers[key] = window.setTimeout(async () => {
+      delete state.reloadTimers[key];
+      try {
+        await task();
+      } catch (error) {
+        showToast(error.message || "Could not refresh changes.");
+      }
+    }, delay);
   }
 
   function isRecentPurchase(item) {
@@ -1267,7 +1301,8 @@
       .from("shopping_temp_lists")
       .select("id, household_id, title, created_by, created_at, updated_at")
       .eq("household_id", state.household.id)
-      .order("created_at", { ascending: false });
+      .order("created_at", { ascending: false })
+      .limit(TEMP_LIST_LIMIT);
 
     if (listsError) {
       throw listsError;
@@ -1277,7 +1312,8 @@
       .from("shopping_temp_list_items")
       .select("id, list_id, household_id, text, is_done, created_by, created_at")
       .eq("household_id", state.household.id)
-      .order("created_at", { ascending: true });
+      .order("created_at", { ascending: true })
+      .limit(TEMP_LIST_ITEM_LIMIT);
 
     if (itemsError) {
       throw itemsError;
@@ -1795,10 +1831,12 @@
       return;
     }
 
+    const recentPurchasedCutoff = daysAgoIso(RECENT_ITEM_QUERY_DAYS);
     const { data, error } = await state.client
       .from("shopping_items")
-      .select("*")
+      .select(SHOPPING_ITEM_COLUMNS)
       .eq("household_id", state.household.id)
+      .or(`is_purchased.eq.false,purchased_at.gte.${recentPurchasedCutoff}`)
       .order("created_at", { ascending: false });
 
     if (error && String(error.message || "").includes("meal_group")) {
@@ -1806,6 +1844,7 @@
         .from("shopping_items")
         .select("id, household_id, name, note, is_urgent, is_purchased, purchased_at, created_by, purchased_by, created_at, updated_at")
         .eq("household_id", state.household.id)
+        .or(`is_purchased.eq.false,purchased_at.gte.${recentPurchasedCutoff}`)
         .order("created_at", { ascending: false });
 
       if (fallback.error) {
@@ -1834,7 +1873,7 @@
 
     const { data, error } = await state.client
       .from("shopping_notifications")
-      .select("*")
+      .select("id, household_id, actor_id, event_type, payload, created_at")
       .eq("household_id", state.household.id)
       .order("created_at", { ascending: false })
       .limit(10);
@@ -1950,6 +1989,8 @@
       state.client.removeChannel(channel);
     });
     state.channels = [];
+    Object.values(state.reloadTimers).forEach((timer) => window.clearTimeout(timer));
+    state.reloadTimers = {};
   }
 
   async function subscribeRealtime() {
@@ -1970,8 +2011,10 @@
           filter: `household_id=eq.${state.household.id}`
         },
         async () => {
-          await loadItems();
-          renderItems();
+          scheduleReload("items", async () => {
+            await loadItems();
+            renderItems();
+          });
         }
       )
       .subscribe();
@@ -2003,7 +2046,12 @@
             }
           }
 
-          await loadNotifications();
+          if (payload.new) {
+            state.notifications = [
+              payload.new,
+              ...state.notifications.filter((notification) => notification.id !== payload.new.id)
+            ].slice(0, 10);
+          }
           renderActivity();
         }
       )
@@ -2021,8 +2069,10 @@
           filter: `household_id=eq.${state.household.id}`
         },
         async () => {
-          await loadTempLists();
-          renderTempLists();
+          scheduleReload("tempLists", async () => {
+            await loadTempLists();
+            renderTempLists();
+          });
         }
       )
       .on(
@@ -2034,8 +2084,10 @@
           filter: `household_id=eq.${state.household.id}`
         },
         async () => {
-          await loadTempLists();
-          renderTempLists();
+          scheduleReload("tempLists", async () => {
+            await loadTempLists();
+            renderTempLists();
+          });
         }
       )
       .subscribe();
@@ -2050,13 +2102,15 @@
           filter: `household_id=eq.${state.household.id}`
         },
         async () => {
-          try {
-            await loadMemberships();
-            if (state.activeTab === "memberships") renderMemberships();
-          } catch (error) {
-            state.membershipsError = error.message || "Could not load memberships.";
-            if (state.activeTab === "memberships") renderMemberships();
-          }
+          scheduleReload("memberships", async () => {
+            try {
+              await loadMemberships();
+              if (state.activeTab === "memberships") renderMemberships();
+            } catch (error) {
+              state.membershipsError = error.message || "Could not load memberships.";
+              if (state.activeTab === "memberships") renderMemberships();
+            }
+          });
         }
       )
       .subscribe();
@@ -2071,8 +2125,10 @@
           filter: `household_id=eq.${state.household.id}`
         },
         async () => {
-          await loadRecipes();
-          if (state.activeTab === "recipes") renderRecipeBooks();
+          scheduleReload("recipes", async () => {
+            await loadRecipes();
+            if (state.activeTab === "recipes") renderRecipeBooks();
+          });
         }
       )
       .subscribe();
@@ -2093,7 +2149,7 @@
         invite_code: inviteCode,
         created_by: state.session.user.id
       })
-      .select("*")
+      .select("id, name, invite_code")
       .single();
 
     if (error) {
@@ -2119,7 +2175,7 @@
 
     const { data: household, error: lookupError } = await state.client
       .from("shopping_households")
-      .select("*")
+      .select("id, name, invite_code")
       .eq("invite_code", inviteCode.toUpperCase())
       .maybeSingle();
 
@@ -2333,13 +2389,15 @@
     const { data, error } = await state.client
       .from("shopping_personal_notes")
       .select("id, text, done, due_date, created_at")
-      .order("created_at", { ascending: false });
+      .order("created_at", { ascending: false })
+      .limit(PERSONAL_NOTE_LIMIT);
     if (error) {
       if (String(error.message || "").toLowerCase().includes("due_date")) {
         const fallback = await state.client
           .from("shopping_personal_notes")
           .select("id, text, done, created_at")
-          .order("created_at", { ascending: false });
+          .order("created_at", { ascending: false })
+          .limit(PERSONAL_NOTE_LIMIT);
         if (fallback.error) throw fallback.error;
         state.personalNotes = (fallback.data || []).map((note) => ({ ...note, due_date: null }));
         showToast("Run notes-due-date-schema-update.sql to enable note due dates.");
@@ -2801,26 +2859,27 @@
     const { data: receipt, error: recErr } = await state.client
       .from("shopping_receipts")
       .insert({ household_id: state.household.id, uploaded_by: state.session.user.id, store_name: storeName, receipt_date: receiptDate, total_amount: totalAmount, image_path: imagePath })
-      .select().single();
+      .select("id")
+      .single();
     if (recErr) throw recErr;
 
-    const { error: itemsErr } = await state.client.from("shopping_receipt_items").insert(
-      includedItems.map((i) => ({
-        receipt_id: receipt.id,
-        household_id: state.household.id,
-        item_name: i.name || "",
-        normalized_item_name: (i.name || "").toLowerCase().trim(),
-        category: i.category || "Other",
-        quantity: parseFloat(i.quantity) || 0,
-        line_total: parseFloat(i.amount) || 0,
-        receipt_date: receiptDate
-      }))
-    );
+    const receiptItemPayload = includedItems.map((i) => ({
+      receipt_id: receipt.id,
+      household_id: state.household.id,
+      item_name: i.name || "",
+      normalized_item_name: (i.name || "").toLowerCase().trim(),
+      category: i.category || "Other",
+      quantity: parseFloat(i.quantity) || 0,
+      line_total: parseFloat(i.amount) || 0,
+      receipt_date: receiptDate
+    }));
+    const { data: savedItems, error: itemsErr } = await state.client.from("shopping_receipt_items").insert(
+      receiptItemPayload
+    ).select("id, item_name");
     if (itemsErr) throw itemsErr;
 
     const trackedListId = elements.receiptTrackListSelect?.value;
     if (trackedListId && starredItems.length) {
-      const { data: savedItems } = await state.client.from("shopping_receipt_items").select("id, item_name").eq("receipt_id", receipt.id);
       const trackPayload = starredItems.map((i) => ({
         tracked_list_id: trackedListId,
         receipt_item_id: savedItems?.find((s) => s.item_name === i.name)?.id || null,
@@ -2847,28 +2906,45 @@
   /* ── Receipt / analytics loading ─────────────────────────── */
 
   async function loadReceipts() {
-    if (!state.household) return;
+    if (!state.household) {
+      state.receipts = [];
+      return;
+    }
 
     const { data: receipts, error } = await state.client
       .from("shopping_receipts")
       .select("id, store_name, receipt_date, total_amount, image_path, uploaded_by, created_at")
       .eq("household_id", state.household.id)
-      .order("receipt_date", { ascending: false, nullsFirst: false });
+      .gte("receipt_date", daysAgoDateValue(RECEIPT_HISTORY_DAYS))
+      .order("receipt_date", { ascending: false, nullsFirst: false })
+      .limit(RECEIPT_HISTORY_LIMIT);
     if (error) throw error;
 
     if (receipts && receipts.length) {
-      const { data: items } = await state.client
+      const { data: items, error: itemsError } = await state.client
         .from("shopping_receipt_items")
         .select("id, receipt_id, item_name, line_total, quantity, category")
         .in("receipt_id", receipts.map((r) => r.id));
-      state.receipts = receipts.map((r) => ({ ...r, items: (items || []).filter((i) => i.receipt_id === r.id) }));
+      if (itemsError) throw itemsError;
+
+      const itemsByReceipt = new Map();
+      (items || []).forEach((item) => {
+        if (!itemsByReceipt.has(item.receipt_id)) {
+          itemsByReceipt.set(item.receipt_id, []);
+        }
+        itemsByReceipt.get(item.receipt_id).push(item);
+      });
+      state.receipts = receipts.map((r) => ({ ...r, items: itemsByReceipt.get(r.id) || [] }));
     } else {
       state.receipts = [];
     }
   }
 
   async function loadTrackedLists() {
-    if (!state.household) return;
+    if (!state.household) {
+      state.trackedLists = [];
+      return;
+    }
     const { data: lists, error } = await state.client
       .from("shopping_tracked_lists")
       .select("id, name, created_by, created_at")
@@ -2877,11 +2953,13 @@
     if (error) throw error;
 
     if (lists && lists.length) {
-      const { data: items } = await state.client
+      const { data: items, error: itemsError } = await state.client
         .from("shopping_tracked_list_items")
         .select("id, tracked_list_id, receipt_item_id, name, amount, note, created_at")
         .in("tracked_list_id", lists.map((l) => l.id))
-        .order("created_at", { ascending: true });
+        .order("created_at", { ascending: false })
+        .limit(TRACKED_ITEM_LIMIT);
+      if (itemsError) throw itemsError;
 
       const trackedItems = items || [];
       const receiptItemIds = [...new Set(trackedItems.map((item) => item.receipt_item_id).filter(Boolean))];
@@ -4602,7 +4680,8 @@
       .from("shopping_recipes")
       .select("id, name, ingredients, body, created_by, created_at, taste_rating, ease_rating, last_added_at")
       .eq("household_id", state.household.id)
-      .order("created_at", { ascending: false });
+      .order("created_at", { ascending: false })
+      .limit(RECIPE_LIMIT);
     if (error) throw error;
     state.recipes = data || [];
   }
